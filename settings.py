@@ -27,13 +27,42 @@ DEFAULTS = {
         "hotkey": "right ctrl",    # key name (keyboard library naming)
         "mic": None,               # {vid, pid, product, byte_index, match, mask/value}
     },
+    # Audio capture device. None = system default input. Otherwise the
+    # sounddevice device name (a stable string that survives index reshuffles).
+    "audio_device": None,
+    # How transcribed text reaches the cursor:
+    #   "paste" = clipboard + Ctrl+V (fast; briefly places text on the clipboard)
+    #   "type"  = simulate keystrokes (nothing ever touches the clipboard)
+    "inject_method": "paste",
     "trailing_space": True,
     "capitalize_first": True,
+    # When True, transcripts are printed to the console for troubleshooting.
+    # Leave False in clinical use so PHI never lands in a captured log.
+    "debug": False,
     "strip_leading": ["okay", "mm-hmm", "mhm", "um", "uh", "so", "yeah"],
     "ignore_if_only": ["okay", "mm-hmm", "mhm", "um", "uh", "yeah", "yes",
                         "no", "thanks", "thank you"],
+    # Exact-match templates: the whole utterance must match the trigger.
     "macros": {
         "adult patient checkout": DEFAULT_MACRO,
+    },
+    # Inline replacements: spoken form -> written form, applied anywhere in a
+    # sentence. Good for drug shorthand, abbreviations, and fixing mis-hears.
+    # e.g. "metformin five hundred" -> "metformin 500 mg", "a fib" -> "AFib".
+    "substitutions": {},
+    # Local numeric / medical formatting. Each is a no-op unless it is confident.
+    "formatting": {
+        "vitals": True,    # "one twenty over eighty" -> "120/80"
+        "units": True,     # "twenty five milligrams" -> "25 mg"
+        "numbers": False,  # convert every spoken number to digits (affects prose)
+    },
+    # Continuous dictation: split a long hold at natural pauses (Silero VAD) and
+    # insert each sentence as you speak, removing the ~30 s single-clip ceiling.
+    "continuous": {
+        "enabled": False,
+        "min_silence_ms": 700,   # pause length that ends a segment
+        "max_segment_s": 20,     # hard cut if no pause (keeps clips model-sized)
+        "threshold": 0.5,        # Silero speech probability threshold
     },
 }
 
@@ -78,11 +107,16 @@ def settings_path():
     return d / SETTINGS_FILENAME
 
 
+# Nested dicts that should be key-merged with defaults (so flags added in a
+# later version still get a value) rather than wholesale-replaced by old files.
+_MERGE_KEYS = ("input", "formatting", "continuous")
+
+
 def _merge_defaults(data):
     merged = json.loads(json.dumps(DEFAULTS))  # deep copy
     for k, v in data.items():
-        if k == "input" and isinstance(v, dict):
-            merged["input"].update(v)
+        if k in _MERGE_KEYS and isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k].update(v)
         else:
             merged[k] = v
     return merged

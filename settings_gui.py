@@ -30,13 +30,16 @@ class SettingsWindow(tk.Toplevel):
         nb.pack(fill="both", expand=True, padx=8, pady=8)
 
         self._build_input_tab(nb)
+        self._build_general_tab(nb)
+        self._build_macro_tab(nb)
+        self._build_substitutions_tab(nb)
+        self._build_formatting_tab(nb)
         self._build_list_tab(nb, "Strip from start", "strip_leading",
                              "One word per line. Removed from the START of a "
                              "phrase (fixes 'Okay ...' / 'Mm-hmm ...').")
         self._build_list_tab(nb, "Ignore if alone", "ignore_if_only",
                              "One word/phrase per line. Dropped only when it is "
                              "the ENTIRE utterance.")
-        self._build_macro_tab(nb)
 
         bar = ttk.Frame(self)
         bar.pack(fill="x", padx=8, pady=(0, 8))
@@ -98,6 +101,45 @@ class SettingsWindow(tk.Toplevel):
                        "button you want (e.g. the mic's record button). Close "
                        "Dragon first so the button reaches this app.").grid(
             row=7, column=0, columnspan=3, sticky="w", pady=6)
+
+        ttk.Separator(f, orient="horizontal").grid(
+            row=8, column=0, columnspan=3, sticky="ew", pady=10)
+
+        # audio capture device (which microphone the words are recorded from)
+        ttk.Label(f, text="Microphone (audio):").grid(row=9, column=0, sticky="w", pady=4)
+        self.audio_var = tk.StringVar()
+        self.audio_combo = ttk.Combobox(f, textvariable=self.audio_var,
+                                        width=40, state="readonly")
+        self.audio_combo.grid(row=9, column=1, columnspan=2, sticky="w")
+        self._audio_names = []
+        self._refresh_audio_devices()
+        ttk.Label(f, wraplength=580, foreground="#555",
+                  text="Which microphone is recorded. 'System default' follows "
+                       "Windows' default input device.").grid(
+            row=10, column=0, columnspan=3, sticky="w", pady=(2, 6))
+
+    _AUDIO_DEFAULT = "System default"
+
+    def _refresh_audio_devices(self):
+        names = [self._AUDIO_DEFAULT]
+        try:
+            import sounddevice as sd
+            seen = set()
+            for d in sd.query_devices():
+                if d.get("max_input_channels", 0) > 0:
+                    nm = d.get("name", "").strip()
+                    if nm and nm not in seen:
+                        seen.add(nm)
+                        names.append(nm)
+        except Exception as e:
+            print(f"[audio] device list unavailable: {e}")
+        self._audio_names = names
+        self.audio_combo["values"] = names
+        current = self.data.get("audio_device")
+        if current and current in names:
+            self.audio_combo.current(names.index(current))
+        else:
+            self.audio_combo.current(0)
 
     def _binding_text(self):
         try:
@@ -181,6 +223,87 @@ class SettingsWindow(tk.Toplevel):
                 pass
             self._capture_hook = None
 
+    # ---- General tab -----------------------------------------------------
+    def _build_general_tab(self, nb):
+        f = ttk.Frame(nb)
+        nb.add(f, text="General")
+
+        ttk.Label(f, text="How text is inserted at the cursor:",
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=8, pady=(10, 2))
+        self.inject_var = tk.StringVar(value=self.data.get("inject_method", "paste"))
+        ttk.Radiobutton(f, text="Paste  -  fast; briefly uses the clipboard "
+                        "(restored after)", variable=self.inject_var,
+                        value="paste").pack(anchor="w", padx=20)
+        ttk.Radiobutton(f, text="Type  -  simulate keystrokes; nothing ever "
+                        "touches the clipboard (best for PHI)",
+                        variable=self.inject_var, value="type").pack(anchor="w", padx=20)
+
+        ttk.Separator(f, orient="horizontal").pack(fill="x", padx=8, pady=12)
+
+        self.trailing_var = tk.BooleanVar(value=self.data.get("trailing_space", True))
+        ttk.Checkbutton(f, text="Add a trailing space after each insert",
+                        variable=self.trailing_var).pack(anchor="w", padx=8, pady=2)
+        self.capitalize_var = tk.BooleanVar(value=self.data.get("capitalize_first", True))
+        ttk.Checkbutton(f, text="Capitalize the first letter of each insert",
+                        variable=self.capitalize_var).pack(anchor="w", padx=8, pady=2)
+        self.debug_var = tk.BooleanVar(value=self.data.get("debug", False))
+        ttk.Checkbutton(f, text="Debug logging (prints transcripts to the "
+                        "console — leave OFF in clinical use)",
+                        variable=self.debug_var).pack(anchor="w", padx=8, pady=2)
+
+        ttk.Separator(f, orient="horizontal").pack(fill="x", padx=8, pady=12)
+
+        cont = self.data.get("continuous", {})
+        ttk.Label(f, text="Continuous dictation (beta):",
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=8, pady=(0, 2))
+        self.cont_enabled = tk.BooleanVar(value=cont.get("enabled", False))
+        ttk.Checkbutton(f, text="Insert sentences as I pause (removes the ~30 s "
+                        "length limit; downloads a ~2 MB model once)",
+                        variable=self.cont_enabled).pack(anchor="w", padx=20, pady=2)
+        prow = ttk.Frame(f)
+        prow.pack(anchor="w", padx=20, pady=2)
+        ttk.Label(prow, text="Pause before inserting (ms):").pack(side="left")
+        self.cont_silence = tk.IntVar(value=int(cont.get("min_silence_ms", 700)))
+        ttk.Spinbox(prow, from_=200, to=2000, increment=50, width=6,
+                    textvariable=self.cont_silence).pack(side="left", padx=6)
+
+    # ---- Substitutions tab ----------------------------------------------
+    def _build_substitutions_tab(self, nb):
+        f = ttk.Frame(nb)
+        nb.add(f, text="Substitutions")
+        ttk.Label(f, wraplength=580, foreground="#555",
+                  text="Inline replacements applied anywhere in a sentence. "
+                       "One per line as  spoken => written.\n"
+                       "Examples:\n"
+                       "    a fib => AFib\n"
+                       "    sob => shortness of breath\n"
+                       "    prn => as needed").pack(anchor="w", padx=6, pady=6)
+        self.subs_text = tk.Text(f, height=16, wrap="none")
+        self.subs_text.pack(fill="both", expand=True, padx=6, pady=6)
+        lines = [f"{k} => {v}" for k, v in self.data.get("substitutions", {}).items()]
+        self.subs_text.insert("1.0", "\n".join(lines))
+
+    # ---- Formatting tab --------------------------------------------------
+    def _build_formatting_tab(self, nb):
+        f = ttk.Frame(nb)
+        nb.add(f, text="Formatting")
+        fmt = self.data.get("formatting", {})
+        ttk.Label(f, wraplength=580, foreground="#555",
+                  text="Local number/medical formatting. Each rule stays a "
+                       "no-op unless it is confident, so it won't disturb "
+                       "ordinary prose.").pack(anchor="w", padx=8, pady=(10, 6))
+
+        self.fmt_vitals = tk.BooleanVar(value=fmt.get("vitals", True))
+        ttk.Checkbutton(f, text="Vitals:  'one twenty over eighty'  →  '120/80'",
+                        variable=self.fmt_vitals).pack(anchor="w", padx=12, pady=3)
+        self.fmt_units = tk.BooleanVar(value=fmt.get("units", True))
+        ttk.Checkbutton(f, text="Units:  'twenty five milligrams'  →  '25 mg'",
+                        variable=self.fmt_units).pack(anchor="w", padx=12, pady=3)
+        self.fmt_numbers = tk.BooleanVar(value=fmt.get("numbers", False))
+        ttk.Checkbutton(f, text="All numbers to digits  'twenty five' → '25'  "
+                        "(also affects prose — off by default)",
+                        variable=self.fmt_numbers).pack(anchor="w", padx=12, pady=3)
+
     # ---- generic word-list tab ------------------------------------------
     def _build_list_tab(self, nb, title, key, hint):
         f = ttk.Frame(nb)
@@ -259,6 +382,19 @@ class SettingsWindow(tk.Toplevel):
         txt = getattr(self, f"_text_{key}").get("1.0", "end")
         return [ln.strip() for ln in txt.splitlines() if ln.strip()]
 
+    def _parse_substitutions(self):
+        """Parse 'spoken => written' lines into a dict (spoken lowercased)."""
+        out = {}
+        for ln in self.subs_text.get("1.0", "end").splitlines():
+            if "=>" not in ln:
+                continue
+            spoken, written = ln.split("=>", 1)
+            spoken = spoken.strip().lower()
+            written = written.strip()
+            if spoken:
+                out[spoken] = written
+        return out
+
     def _save(self):
         # commit whatever is currently in the macro editor so an unsaved
         # new/edited macro isn't lost when the user hits Save directly.
@@ -268,6 +404,25 @@ class SettingsWindow(tk.Toplevel):
         self.data["input"]["hold_or_toggle"] = self.behavior_var.get()
         self.data["input"]["hotkey"] = self.key_var.get().strip() or "right ctrl"
         self.data["input"]["mic"] = self.mic_binding
+        sel_audio = self.audio_var.get()
+        self.data["audio_device"] = None if sel_audio == self._AUDIO_DEFAULT else sel_audio
+        self.data["inject_method"] = self.inject_var.get()
+        self.data["trailing_space"] = bool(self.trailing_var.get())
+        self.data["capitalize_first"] = bool(self.capitalize_var.get())
+        self.data["debug"] = bool(self.debug_var.get())
+        self.data["substitutions"] = self._parse_substitutions()
+        self.data["formatting"] = {
+            "vitals": bool(self.fmt_vitals.get()),
+            "units": bool(self.fmt_units.get()),
+            "numbers": bool(self.fmt_numbers.get()),
+        }
+        cont = dict(self.data.get("continuous", {}))
+        cont["enabled"] = bool(self.cont_enabled.get())
+        try:
+            cont["min_silence_ms"] = int(self.cont_silence.get())
+        except (tk.TclError, ValueError):
+            pass
+        self.data["continuous"] = cont
         self.data["strip_leading"] = self._parse_list("strip_leading")
         self.data["ignore_if_only"] = self._parse_list("ignore_if_only")
         self.data["macros"] = self.macros
