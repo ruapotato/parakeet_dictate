@@ -30,9 +30,9 @@ insertion, medical formatting, and templates — and ships as a single `.exe`.
 | **Macros** — say a phrase, insert a whole paragraph/template | ✅ |
 | **Substitutions** — spoken abbreviation → written form, inline | ✅ |
 | **Medical formatting** — `one twenty over eighty` → `120/80`, `twenty five milligrams` → `25 mg` | ✅ |
-| **Continuous dictation** — hold and talk for as long as you like; sentences insert as you pause (Silero VAD) | ✅ |
+| **Continuous dictation** (checkbox in the General tab) — hold and talk for as long as you like; sentences insert as you pause (Silero VAD) | ✅ |
 | Filler-word cleanup (`strip from start`, `ignore if alone`) | ✅ |
-| Roaming settings (follow the user across machines) | ✅ |
+| Roaming settings — settings live in Documents, so they follow the user on any setup where the Documents folder is shared across machines (roaming profile / folder redirection) | ✅ |
 | Single-file Windows `.exe`, optional automated CI builds | ✅ |
 
 See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for a full settings walkthrough
@@ -94,12 +94,13 @@ This yields a ~700 MB+ exe that needs zero network on any machine.
 
 ## Notes / gotchas
 
-- **The `keyboard` library needs admin** to install its global hook on some
-  Windows configs. If the hotkey does nothing, run the exe as administrator.
+- **Global hotkey:** the hotkey normally works without elevation. If the key
+  does nothing on a locked-down machine, try running the exe as administrator —
+  some Windows configs restrict the global keyboard hook.
 - **Utterance length:** by default each press is one clip and the model is
-  happiest under ~30 s. For paragraph-length notes, turn on **Continuous
-  dictation** (General tab): a small Silero VAD splits your speech at natural
-  pauses and inserts each sentence as you talk, with no length limit. It
+  happiest under ~30 s. For paragraph-length notes, turn on the **Continuous
+  dictation** checkbox (General tab): a small Silero VAD splits your speech at
+  natural pauses and inserts each sentence as you talk, with no length limit. It
   downloads a ~2 MB model once, then runs offline.
 - **Using a Dragon mic button?** Close Dragon first so the button's HID reports
   reach this app.

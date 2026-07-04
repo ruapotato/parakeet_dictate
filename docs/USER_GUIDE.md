@@ -124,7 +124,8 @@ kept.
   handles periods and commas well without you saying them.
 - Use **Substitutions** for any word it reliably gets wrong (unusual drug or
   patient names).
-- Keep each push under ~30 seconds; release and press again for the next
-  passage.
-- If the hotkey does nothing, run the app as **administrator** (the global
-  keyboard hook needs it on some systems).
+- Keep each push under ~30 seconds — or turn on **Continuous dictation** in the
+  General tab (a checkbox) and talk for as long as you like.
+- The hotkey normally works without special permissions. If it does nothing on a
+  locked-down machine, try running the app as **administrator** — some Windows
+  configs restrict the global keyboard hook.
