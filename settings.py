@@ -62,7 +62,9 @@ DEFAULTS = {
     # insert each sentence as you speak, removing the ~30 s single-clip ceiling.
     "continuous": {
         "enabled": False,
-        "min_silence_ms": 500,   # pause length that ends a segment
+        "min_silence_ms": 300,   # pause length that ends a segment (lower = each
+                                 # sentence inserts sooner; too low can cut mid-
+                                 # sentence on a thinking pause)
         "max_segment_s": 20,     # hard cut if no pause (keeps clips model-sized)
         "threshold": 0.5,        # Silero speech probability threshold
     },

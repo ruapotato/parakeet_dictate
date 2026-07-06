@@ -288,8 +288,10 @@ class SettingsWindow(tk.Toplevel):
         prow.pack(anchor="w", padx=20, pady=2)
         ttk.Label(prow, text="Pause before inserting (ms):").pack(side="left")
         self.cont_silence = tk.IntVar(value=int(cont.get("min_silence_ms", 700)))
-        ttk.Spinbox(prow, from_=200, to=2000, increment=50, width=6,
+        ttk.Spinbox(prow, from_=150, to=2000, increment=50, width=6,
                     textvariable=self.cont_silence).pack(side="left", padx=6)
+        ttk.Label(prow, text="(lower = each sentence inserts sooner)",
+                  foreground="#777").pack(side="left", padx=6)
 
     # ---- Substitutions tab ----------------------------------------------
     def _build_substitutions_tab(self, nb):
