@@ -100,10 +100,95 @@ def watch(vid, pid):
                 pass
 
 
+def _report_size(report):
+    """pywinusb doesn't expose a report's byte length directly; find it by
+    probing which all-zero buffer set_raw_data accepts (harmless)."""
+    for size in range(1, 33):
+        try:
+            report.set_raw_data([0] * size)
+            return size
+        except Exception:
+            continue
+    return None
+
+
+def find_led(vid, pid):
+    """Brute-force the LED control report. Enumerates every output and feature
+    report on the device and flashes each byte high one at a time; watch the
+    mic and note the step where the red LED lights. That report id + byte index
+    is all we need to drive the LED from Parakeet.
+
+    Safe: it only sets one byte at a time and zeroes it back. If the device ever
+    acts oddly, just unplug/replug it.
+    """
+    flt = hid.HidDeviceFilter(vendor_id=vid) if pid is None \
+        else hid.HidDeviceFilter(vendor_id=vid, product_id=pid)
+    devices = flt.get_devices()
+    if not devices:
+        print(f"No device matched vid=0x{vid:04x}"
+              + (f" pid=0x{pid:04x}" if pid else ""))
+        return
+
+    for dev in devices:
+        try:
+            dev.open()
+        except Exception as e:
+            print(f"Could not open device: {e}")
+            continue
+        try:
+            reports = []
+            try:
+                reports += [("output", r) for r in dev.find_output_reports()]
+            except Exception:
+                pass
+            try:
+                reports += [("feature", r) for r in dev.find_feature_reports()]
+            except Exception:
+                pass
+            if not reports:
+                print(f"0x{dev.vendor_id:04x}/0x{dev.product_id:04x} "
+                      f"{dev.product_name}: no writable reports on this interface")
+                continue
+            print(f"\n=== 0x{dev.vendor_id:04x}/0x{dev.product_id:04x} "
+                  f"{dev.product_name}: {len(reports)} writable report(s) ===")
+            for kind, report in reports:
+                size = _report_size(report)
+                if not size:
+                    continue
+                rid = report.report_id
+                print(f"\n--- {kind} report id={rid} ({size} bytes) --- "
+                      "WATCH THE LED")
+                for i in range(size):
+                    buf = [0] * size
+                    buf[i] = 0xFF
+                    try:
+                        report.set_raw_data(buf)
+                        report.send()
+                    except Exception as e:
+                        print(f"  byte[{i}] send failed: {e}")
+                        continue
+                    print(f"  {kind} id={rid} byte[{i}]=0xFF  <-- LED on now?")
+                    time.sleep(1.3)
+                    try:
+                        report.set_raw_data([0] * size)
+                        report.send()
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass
+    print("\nDone. Tell me the line that lit the LED (kind, report id, byte).")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vid", help="vendor id, e.g. 0x0554")
     ap.add_argument("--pid", help="product id, e.g. 0x1001")
+    ap.add_argument("--leds", action="store_true",
+                    help="probe output/feature reports to find the LED control byte")
     args = ap.parse_args()
 
     if not args.vid:
@@ -113,7 +198,10 @@ def main():
     pid = None
     if args.pid:
         pid = int(args.pid, 16) if args.pid.lower().startswith("0x") else int(args.pid)
-    watch(vid, pid)
+    if args.leds:
+        find_led(vid, pid)
+    else:
+        watch(vid, pid)
 
 
 if __name__ == "__main__":
