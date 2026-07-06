@@ -385,9 +385,16 @@ def install_input():
 
     if mode == "mic_button" and inp.get("mic"):
         mic = inp["mic"]
+        # Extra momentary buttons on the same mic -> keystrokes (fire on press).
+        actions = []
+        if inp.get("mic_tab_forward"):
+            actions.append((inp["mic_tab_forward"], lambda: keyboard.send("tab")))
+        if inp.get("mic_tab_backward"):
+            actions.append((inp["mic_tab_backward"], lambda: keyboard.send("shift+tab")))
         _mic_reader = mic_hid.MicButtonReader(
             mic["vid"], mic["pid"], mic,
-            on_press=_trigger_press, on_release=_trigger_release)
+            on_press=_trigger_press, on_release=_trigger_release,
+            actions=actions)
         if _mic_reader.start():
             return
         # fall back to keyboard if the device could not be opened

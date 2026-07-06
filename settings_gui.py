@@ -21,7 +21,7 @@ class SettingsWindow(tk.Toplevel):
     def __init__(self, master, data, on_save):
         super().__init__(master)
         self.title("Parakeet Dictate - Settings")
-        self.geometry("640x560")
+        self.geometry("640x620")
         self.data = data
         self.on_save = on_save
         self._capture_hook = None
@@ -52,6 +52,8 @@ class SettingsWindow(tk.Toplevel):
         nb.add(f, text="Input")
         inp = self.data["input"]
         self.mic_binding = dict(inp["mic"]) if inp.get("mic") else None
+        self.tab_fwd_binding = dict(inp["mic_tab_forward"]) if inp.get("mic_tab_forward") else None
+        self.tab_back_binding = dict(inp["mic_tab_backward"]) if inp.get("mic_tab_backward") else None
 
         self.mode_var = tk.StringVar(value=inp.get("mode", "hotkey"))
         ttk.Label(f, text="Trigger source:").grid(row=0, column=0, sticky="w", pady=6)
@@ -89,22 +91,37 @@ class SettingsWindow(tk.Toplevel):
         self._devices = []
         self._refresh_devices(select_current=True)
 
-        rr = ttk.Frame(f)
-        rr.grid(row=5, column=1, columnspan=2, sticky="w", pady=4)
-        self.refresh_btn = ttk.Button(rr, text="Refresh", command=self._refresh_devices)
-        self.refresh_btn.pack(side="left")
-        self.bind_btn = ttk.Button(rr, text="Capture button...",
-                                   command=self._capture_button)
-        self.bind_btn.pack(side="left", padx=6)
+        # One capture button per mic function. Dictate = the record/trigger
+        # button; Tab Forward/Backward send Tab / Shift+Tab so you can jump
+        # between fields without leaving the mic.
+        cap = ttk.Frame(f)
+        cap.grid(row=5, column=0, columnspan=3, sticky="w", pady=4)
+        self.refresh_btn = ttk.Button(cap, text="Refresh devices",
+                                      command=self._refresh_devices)
+        self.refresh_btn.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
-        self.binding_lbl = ttk.Label(f, foreground="#555", text=self._binding_text())
-        self.binding_lbl.grid(row=6, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        self._btn_labels = {
+            "dictate": "Capture Dictate (record)...",
+            "tab_forward": "Capture Tab Forward...",
+            "tab_backward": "Capture Tab Backward...",
+        }
+        self.capture_btns = {}
+        self.binding_lbls = {}
+        for r, target in enumerate(("dictate", "tab_forward", "tab_backward"), start=1):
+            btn = ttk.Button(cap, text=self._btn_labels[target],
+                             command=lambda t=target: self._capture_button(t))
+            btn.grid(row=r, column=0, sticky="w", pady=2)
+            lbl = ttk.Label(cap, foreground="#555", text=self._binding_text(target))
+            lbl.grid(row=r, column=1, sticky="w", padx=12)
+            self.capture_btns[target] = btn
+            self.binding_lbls[target] = lbl
 
         self.mic_hint = ttk.Label(f, wraplength=580, foreground="#555",
-                  text="Pick the device, click Capture button, then press the "
-                       "button you want (e.g. the mic's record button). Close "
-                       "Dragon first so the button reaches this app.")
-        self.mic_hint.grid(row=7, column=0, columnspan=3, sticky="w", pady=6)
+                  text="Pick the device above, click a Capture button, then press "
+                       "that button on the mic. Close Dragon first so the buttons "
+                       "reach this app. (Tab buttons require the mic as trigger "
+                       "source; they share this device.)")
+        self.mic_hint.grid(row=6, column=0, columnspan=3, sticky="w", pady=6)
 
         ttk.Separator(f, orient="horizontal").grid(
             row=8, column=0, columnspan=3, sticky="ew", pady=10)
@@ -136,8 +153,8 @@ class SettingsWindow(tk.Toplevel):
         mic_state = "disabled" if keyboard_mode else "normal"
         for w in (self.key_label, self.key_entry, self.capture_btn):
             w.config(state=kb_state)
-        for w in (self.device_label, self.refresh_btn, self.bind_btn,
-                  self.binding_lbl, self.mic_hint):
+        for w in (self.device_label, self.refresh_btn, self.mic_hint,
+                  *self.capture_btns.values(), *self.binding_lbls.values()):
             w.config(state=mic_state)
         # Combobox uses "readonly" (not "normal") for its enabled-but-locked look.
         self.device_combo.config(state="disabled" if keyboard_mode else "readonly")
@@ -165,14 +182,19 @@ class SettingsWindow(tk.Toplevel):
         else:
             self.audio_combo.current(0)
 
-    def _binding_text(self):
+    _BINDING_ATTR = {"dictate": "mic_binding",
+                     "tab_forward": "tab_fwd_binding",
+                     "tab_backward": "tab_back_binding"}
+
+    def _binding_text(self, target="dictate"):
+        b = getattr(self, self._BINDING_ATTR[target])
+        if not b:
+            return "not set"
         try:
             import mic_hid
-            desc = mic_hid.describe(self.mic_binding)
+            return mic_hid.describe(b)
         except Exception:
-            desc = "none"
-        name = self.mic_binding.get("product", "") if self.mic_binding else ""
-        return f"Current mic button: {name}  {desc}".strip()
+            return "set"
 
     def _refresh_devices(self, select_current=False):
         try:
@@ -198,26 +220,27 @@ class SettingsWindow(tk.Toplevel):
             return None
         return self._devices[idx]
 
-    def _capture_button(self):
+    def _capture_button(self, target="dictate"):
         dev = self._selected_device()
         if not dev:
             messagebox.showwarning("Capture", "Select a device first.")
             return
         import mic_hid
-        self.bind_btn.config(text="Press the button now...")
+        btn = self.capture_btns[target]
+        btn.config(text="Press the button now...")
         learner = mic_hid.ButtonLearner()
         learner.start(dev["vid"], dev["pid"], window=5.0)
 
         def poll():
             if learner.done.is_set():
-                self.bind_btn.config(text="Capture button...")
+                btn.config(text=self._btn_labels[target])
                 if learner.result:
                     b = dict(learner.result)
                     b.update({"vid": dev["vid"], "pid": dev["pid"],
                               "product": dev["product"]})
-                    self.mic_binding = b
+                    setattr(self, self._BINDING_ATTR[target], b)
                     self.mode_var.set("mic_button")
-                    self.binding_lbl.config(text=self._binding_text())
+                    self.binding_lbls[target].config(text=self._binding_text(target))
                 else:
                     messagebox.showinfo(
                         "Capture",
@@ -473,6 +496,8 @@ class SettingsWindow(tk.Toplevel):
         self.data["input"]["hold_or_toggle"] = self.behavior_var.get()
         self.data["input"]["hotkey"] = self.key_var.get().strip() or "right ctrl"
         self.data["input"]["mic"] = self.mic_binding
+        self.data["input"]["mic_tab_forward"] = self.tab_fwd_binding
+        self.data["input"]["mic_tab_backward"] = self.tab_back_binding
         sel_audio = self.audio_var.get()
         self.data["audio_device"] = None if sel_audio == self._AUDIO_DEFAULT else sel_audio
         self.data["inject_method"] = self.inject_var.get()

@@ -130,15 +130,35 @@ def describe(binding):
     return f"byte {i} bit 0x{binding['mask']:02x}"
 
 
-class MicButtonReader:
-    """Open a HID device and fire on_press/on_release for a learned binding."""
+def binding_pressed(binding, data):
+    """Is `binding` currently pressed in this raw report? Works for any button
+    binding (byte/bitmask or byte/value)."""
+    if not binding:
+        return False
+    i = binding.get("byte_index", 0)
+    if i >= len(data):
+        return False
+    if binding.get("match") == "value":
+        return data[i] == binding.get("value")
+    return bool(data[i] & binding.get("mask", 0))
 
-    def __init__(self, vid, pid, binding, on_press, on_release):
+
+class MicButtonReader:
+    """Open a HID device and drive callbacks from learned button bindings.
+
+    The Dictate button uses on_press/on_release (hold or toggle). Each entry in
+    `actions` is a (binding, callback) pair fired once on the press edge — used
+    for momentary buttons like Tab Forward / Tab Backward that emit a keystroke.
+    All buttons are read from the same report stream (one HID collection)."""
+
+    def __init__(self, vid, pid, binding, on_press, on_release, actions=None):
         self.vid = vid
         self.pid = pid
         self.binding = binding
         self.on_press = on_press
         self.on_release = on_release
+        self.actions = list(actions or [])
+        self._action_down = [False] * len(self.actions)
         self._dev = None
         self._down = False
         self._ok = False
@@ -146,16 +166,8 @@ class MicButtonReader:
     def available(self):
         return self._ok
 
-    def _pressed(self, data):
-        i = self.binding.get("byte_index", 0)
-        if i >= len(data):
-            return False
-        if self.binding.get("match") == "value":
-            return data[i] == self.binding.get("value")
-        return bool(data[i] & self.binding.get("mask", 0))
-
     def _on_report(self, data):
-        pressed = self._pressed(data)
+        pressed = binding_pressed(self.binding, data)
         if pressed and not self._down:
             self._down = True
             try:
@@ -168,6 +180,17 @@ class MicButtonReader:
                 self.on_release()
             except Exception as e:
                 print(f"[mic] on_release: {e}")
+        # momentary action buttons (fire once per press edge)
+        for idx, (binding, callback) in enumerate(self.actions):
+            down = binding_pressed(binding, data)
+            if down and not self._action_down[idx]:
+                self._action_down[idx] = True
+                try:
+                    callback()
+                except Exception as e:
+                    print(f"[mic] action: {e}")
+            elif not down and self._action_down[idx]:
+                self._action_down[idx] = False
 
     def start(self):
         try:

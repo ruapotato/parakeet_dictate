@@ -25,7 +25,11 @@ DEFAULTS = {
         "mode": "hotkey",          # "hotkey" or "mic_button"
         "hold_or_toggle": "hold",  # "hold" = push-to-talk, "toggle" = press on/off
         "hotkey": "right ctrl",    # key name (keyboard library naming)
-        "mic": None,               # {vid, pid, product, byte_index, match, mask/value}
+        "mic": None,               # Dictate button: {vid, pid, product, byte_index, match, mask/value}
+        # Extra PowerMic buttons -> keystrokes, same binding shape as "mic".
+        # Fire a Tab / Shift+Tab on press so field-to-field nav works from the mic.
+        "mic_tab_forward": None,
+        "mic_tab_backward": None,
     },
     # Audio capture device. None = system default input. Otherwise the
     # sounddevice device name (a stable string that survives index reshuffles).
