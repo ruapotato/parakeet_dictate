@@ -173,12 +173,16 @@ def stop_and_transcribe():
 # Continuous dictation worker
 # ---------------------------------------------------------------------------
 def _handle_segment(res):
+    """Transcribe+inject one closed segment. Returns True if audio was emitted."""
     global _next_mid_sentence
     if res is None:
-        return
+        return False
     seg, forced = res
+    if seg is None:
+        return False
     _recognize_and_inject(seg, mid_sentence=_next_mid_sentence)
     _next_mid_sentence = bool(forced)
+    return True
 
 
 def _continuous_worker():
@@ -186,25 +190,54 @@ def _continuous_worker():
     transcribe+inject each completed segment in order (single thread = correct
     insertion order and serialized model access)."""
     accum = None
+    raw_hold = []       # every sample of the current hold (fallback source)
+    raw_len = 0
+    emitted = 0         # segments emitted during the current hold
     while True:
         item = _seg_queue.get()
         if item is None:
             return
         if item is _FLUSH:
-            if _segmenter is not None:
-                _handle_segment(_segmenter.flush())
+            try:
+                if _segmenter is not None and _handle_segment(_segmenter.flush()):
+                    emitted += 1
+                # Safety net: if the VAD never carved out a single segment for
+                # the whole hold (mis-loaded model, corrupt download, very quiet
+                # mic...), don't silently drop the user's speech — transcribe the
+                # raw held audio so continuous mode never loses a dictation.
+                if emitted == 0 and raw_hold:
+                    tail = np.concatenate(raw_hold)
+                    if len(tail) / SAMPLE_RATE >= MIN_SECONDS:
+                        print("[continuous] VAD produced no segments this hold; "
+                              "transcribing full audio as fallback", file=sys.stderr)
+                        _recognize_and_inject(tail)
+            except Exception as e:
+                print(f"[continuous] flush failed: {e}", file=sys.stderr)
             accum = None
+            raw_hold = []
+            raw_len = 0
+            emitted = 0
             _set_status("Ready")
             continue
         if _segmenter is None:
             continue
-        n = _vadmod.FRAME_SAMPLES
-        data = item.reshape(-1).astype(np.float32)
-        accum = data if accum is None else np.concatenate([accum, data])
-        while len(accum) >= n:
-            frame = accum[:n]
-            accum = accum[n:]
-            _handle_segment(_segmenter.push(frame))
+        try:
+            n = _vadmod.FRAME_SAMPLES
+            data = item.reshape(-1).astype(np.float32)
+            raw_hold.append(data)
+            raw_len += len(data)
+            # Bound the fallback buffer to the recognizer's max clip length; a
+            # single clip can't usefully be longer anyway.
+            while raw_len > SAMPLE_RATE * MAX_SECONDS and len(raw_hold) > 1:
+                raw_len -= len(raw_hold.pop(0))
+            accum = data if accum is None else np.concatenate([accum, data])
+            while len(accum) >= n:
+                frame = accum[:n]
+                accum = accum[n:]
+                if _handle_segment(_segmenter.push(frame)):
+                    emitted += 1
+        except Exception as e:
+            print(f"[continuous] segmentation error: {e}", file=sys.stderr)
 
 
 def _build_segmenter():
@@ -224,8 +257,10 @@ def _load_vad_bg():
             import vad as _vadmod_local
             _vadmod = _vadmod_local
         if _vad is None:
+            print("[vad] loading Silero VAD for continuous mode...", file=sys.stderr)
             _vad = _vadmod.SileroVAD()
         _segmenter = _build_segmenter()
+        print("[vad] continuous mode ready", file=sys.stderr)
     except Exception as e:
         print(f"[vad] continuous mode unavailable: {e}", file=sys.stderr)
         _segmenter = None
@@ -234,7 +269,7 @@ def _load_vad_bg():
 def inject(text):
     # "type" never touches the clipboard (strongest PHI posture); "paste" is
     # faster and restores whatever the user had on the clipboard afterwards.
-    if SETTINGS.get("inject_method", "paste") == "type":
+    if SETTINGS.get("inject_method", "type") == "type":
         try:
             keyboard.write(text, delay=0)
         except Exception as e:

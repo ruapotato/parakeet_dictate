@@ -50,9 +50,18 @@ def resolve_model(download=True):
         return cache
     if not download:
         return None
+    print(f"[vad] downloading VAD model (~2 MB) from {VAD_URL}", file=sys.stderr)
     tmp = cache.with_name(cache.name + ".part")
     urllib.request.urlretrieve(VAD_URL, tmp)
+    # Guard against a proxy/login page saved in place of the model: the real
+    # Silero ONNX is ~1.8 MB, so anything tiny is not the model.
+    if tmp.stat().st_size < 100 * 1024:
+        size = tmp.stat().st_size
+        tmp.unlink(missing_ok=True)
+        raise OSError(f"VAD download was only {size} B — likely blocked by a "
+                      "proxy/firewall rather than the real model")
     tmp.replace(cache)
+    print(f"[vad] saved VAD model to {cache}", file=sys.stderr)
     return cache
 
 

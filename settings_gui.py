@@ -71,14 +71,17 @@ class SettingsWindow(tk.Toplevel):
             row=2, column=0, columnspan=3, sticky="ew", pady=10)
 
         # keyboard key
-        ttk.Label(f, text="Keyboard key:").grid(row=3, column=0, sticky="w", pady=4)
+        self.key_label = ttk.Label(f, text="Keyboard key:")
+        self.key_label.grid(row=3, column=0, sticky="w", pady=4)
         self.key_var = tk.StringVar(value=inp.get("hotkey", "right ctrl"))
-        ttk.Entry(f, textvariable=self.key_var, width=20).grid(row=3, column=1, sticky="w")
+        self.key_entry = ttk.Entry(f, textvariable=self.key_var, width=20)
+        self.key_entry.grid(row=3, column=1, sticky="w")
         self.capture_btn = ttk.Button(f, text="Capture key...", command=self._capture_key)
         self.capture_btn.grid(row=3, column=2, sticky="w")
 
         # HID device
-        ttk.Label(f, text="Mic / HID device:").grid(row=4, column=0, sticky="w", pady=4)
+        self.device_label = ttk.Label(f, text="Mic / HID device:")
+        self.device_label.grid(row=4, column=0, sticky="w", pady=4)
         self.device_var = tk.StringVar()
         self.device_combo = ttk.Combobox(f, textvariable=self.device_var,
                                          width=32, state="readonly")
@@ -88,7 +91,8 @@ class SettingsWindow(tk.Toplevel):
 
         rr = ttk.Frame(f)
         rr.grid(row=5, column=1, columnspan=2, sticky="w", pady=4)
-        ttk.Button(rr, text="Refresh", command=self._refresh_devices).pack(side="left")
+        self.refresh_btn = ttk.Button(rr, text="Refresh", command=self._refresh_devices)
+        self.refresh_btn.pack(side="left")
         self.bind_btn = ttk.Button(rr, text="Capture button...",
                                    command=self._capture_button)
         self.bind_btn.pack(side="left", padx=6)
@@ -96,11 +100,11 @@ class SettingsWindow(tk.Toplevel):
         self.binding_lbl = ttk.Label(f, foreground="#555", text=self._binding_text())
         self.binding_lbl.grid(row=6, column=0, columnspan=3, sticky="w", pady=(2, 6))
 
-        ttk.Label(f, wraplength=580, foreground="#555",
+        self.mic_hint = ttk.Label(f, wraplength=580, foreground="#555",
                   text="Pick the device, click Capture button, then press the "
                        "button you want (e.g. the mic's record button). Close "
-                       "Dragon first so the button reaches this app.").grid(
-            row=7, column=0, columnspan=3, sticky="w", pady=6)
+                       "Dragon first so the button reaches this app.")
+        self.mic_hint.grid(row=7, column=0, columnspan=3, sticky="w", pady=6)
 
         ttk.Separator(f, orient="horizontal").grid(
             row=8, column=0, columnspan=3, sticky="ew", pady=10)
@@ -117,6 +121,26 @@ class SettingsWindow(tk.Toplevel):
                   text="Which microphone is recorded. 'System default' follows "
                        "Windows' default input device.").grid(
             row=10, column=0, columnspan=3, sticky="w", pady=(2, 6))
+
+        # Gray out whichever trigger's controls aren't in use, and keep it in
+        # sync when the user flips the radio buttons (or when Capture button
+        # auto-switches the mode to mic_button).
+        self.mode_var.trace_add("write", self._sync_input_mode)
+        self._sync_input_mode()
+
+    def _sync_input_mode(self, *_):
+        """Enable only the trigger source that's selected; gray out the other.
+        The audio-capture mic stays enabled in both modes."""
+        keyboard_mode = self.mode_var.get() == "hotkey"
+        kb_state = "normal" if keyboard_mode else "disabled"
+        mic_state = "disabled" if keyboard_mode else "normal"
+        for w in (self.key_label, self.key_entry, self.capture_btn):
+            w.config(state=kb_state)
+        for w in (self.device_label, self.refresh_btn, self.bind_btn,
+                  self.binding_lbl, self.mic_hint):
+            w.config(state=mic_state)
+        # Combobox uses "readonly" (not "normal") for its enabled-but-locked look.
+        self.device_combo.config(state="disabled" if keyboard_mode else "readonly")
 
     _AUDIO_DEFAULT = "System default"
 
@@ -230,13 +254,13 @@ class SettingsWindow(tk.Toplevel):
 
         ttk.Label(f, text="How text is inserted at the cursor:",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=8, pady=(10, 2))
-        self.inject_var = tk.StringVar(value=self.data.get("inject_method", "paste"))
+        self.inject_var = tk.StringVar(value=self.data.get("inject_method", "type"))
+        ttk.Radiobutton(f, text="Type  -  simulate keystrokes; nothing ever "
+                        "touches the clipboard (best for PHI, default)",
+                        variable=self.inject_var, value="type").pack(anchor="w", padx=20)
         ttk.Radiobutton(f, text="Paste  -  fast; briefly uses the clipboard "
                         "(restored after)", variable=self.inject_var,
                         value="paste").pack(anchor="w", padx=20)
-        ttk.Radiobutton(f, text="Type  -  simulate keystrokes; nothing ever "
-                        "touches the clipboard (best for PHI)",
-                        variable=self.inject_var, value="type").pack(anchor="w", padx=20)
 
         ttk.Separator(f, orient="horizontal").pack(fill="x", padx=8, pady=12)
 
@@ -271,17 +295,71 @@ class SettingsWindow(tk.Toplevel):
     def _build_substitutions_tab(self, nb):
         f = ttk.Frame(nb)
         nb.add(f, text="Substitutions")
-        ttk.Label(f, wraplength=580, foreground="#555",
-                  text="Inline replacements applied anywhere in a sentence. "
-                       "One per line as  spoken => written.\n"
-                       "Examples:\n"
-                       "    a fib => AFib\n"
-                       "    sob => shortness of breath\n"
-                       "    prn => as needed").pack(anchor="w", padx=6, pady=6)
-        self.subs_text = tk.Text(f, height=16, wrap="none")
-        self.subs_text.pack(fill="both", expand=True, padx=6, pady=6)
-        lines = [f"{k} => {v}" for k, v in self.data.get("substitutions", {}).items()]
-        self.subs_text.insert("1.0", "\n".join(lines))
+        self.subs = dict(self.data.get("substitutions", {}))
+
+        ttk.Label(f, wraplength=600, foreground="#555",
+                  text="Inline replacements applied anywhere in a sentence "
+                       "(e.g. 'a fib' -> 'AFib', 'sob' -> 'shortness of "
+                       "breath', 'prn' -> 'as needed').").pack(
+            anchor="w", padx=8, pady=(8, 4))
+
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True)
+
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="y", padx=6, pady=6)
+        ttk.Label(left, text="Spoken form:").pack(anchor="w")
+        self.subs_list = tk.Listbox(left, width=26, height=16)
+        self.subs_list.pack(fill="y", expand=True)
+        self.subs_list.bind("<<ListboxSelect>>", self._subs_selected)
+        for k in self.subs:
+            self.subs_list.insert("end", k)
+        sbtns = ttk.Frame(left)
+        sbtns.pack(fill="x", pady=4)
+        ttk.Button(sbtns, text="New", command=self._subs_new).pack(side="left")
+        ttk.Button(sbtns, text="Delete", command=self._subs_delete).pack(side="left", padx=4)
+
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+        ttk.Label(right, text="Spoken form:").pack(anchor="w")
+        self.subs_key = tk.StringVar()
+        ttk.Entry(right, textvariable=self.subs_key).pack(fill="x")
+        ttk.Label(right, text="Replace with:").pack(anchor="w", pady=(8, 0))
+        self.subs_val = tk.StringVar()
+        ttk.Entry(right, textvariable=self.subs_val).pack(fill="x")
+        ttk.Button(right, text="Update this substitution",
+                   command=self._subs_update).pack(anchor="e", pady=8)
+
+    def _subs_selected(self, _e):
+        sel = self.subs_list.curselection()
+        if not sel:
+            return
+        k = self.subs_list.get(sel[0])
+        self.subs_key.set(k)
+        self.subs_val.set(self.subs.get(k, ""))
+
+    def _subs_new(self):
+        self.subs_key.set("")
+        self.subs_val.set("")
+
+    def _subs_delete(self):
+        sel = self.subs_list.curselection()
+        if not sel:
+            return
+        k = self.subs_list.get(sel[0])
+        self.subs.pop(k, None)
+        self.subs_list.delete(sel[0])
+
+    def _subs_update(self):
+        k = self.subs_key.get().strip().lower()
+        v = self.subs_val.get().strip()
+        if not k:
+            messagebox.showwarning("Substitution", "Spoken form cannot be empty.")
+            return
+        existing = list(self.subs.keys())
+        self.subs[k] = v
+        if k not in existing:
+            self.subs_list.insert("end", k)
 
     # ---- Formatting tab --------------------------------------------------
     def _build_formatting_tab(self, nb):
@@ -382,24 +460,13 @@ class SettingsWindow(tk.Toplevel):
         txt = getattr(self, f"_text_{key}").get("1.0", "end")
         return [ln.strip() for ln in txt.splitlines() if ln.strip()]
 
-    def _parse_substitutions(self):
-        """Parse 'spoken => written' lines into a dict (spoken lowercased)."""
-        out = {}
-        for ln in self.subs_text.get("1.0", "end").splitlines():
-            if "=>" not in ln:
-                continue
-            spoken, written = ln.split("=>", 1)
-            spoken = spoken.strip().lower()
-            written = written.strip()
-            if spoken:
-                out[spoken] = written
-        return out
-
     def _save(self):
-        # commit whatever is currently in the macro editor so an unsaved
-        # new/edited macro isn't lost when the user hits Save directly.
+        # commit whatever is currently in the macro / substitution editors so an
+        # unsaved new/edited entry isn't lost when the user hits Save directly.
         if self.macro_key.get().strip():
             self._macro_update()
+        if self.subs_key.get().strip():
+            self._subs_update()
         self.data["input"]["mode"] = self.mode_var.get()
         self.data["input"]["hold_or_toggle"] = self.behavior_var.get()
         self.data["input"]["hotkey"] = self.key_var.get().strip() or "right ctrl"
@@ -410,7 +477,7 @@ class SettingsWindow(tk.Toplevel):
         self.data["trailing_space"] = bool(self.trailing_var.get())
         self.data["capitalize_first"] = bool(self.capitalize_var.get())
         self.data["debug"] = bool(self.debug_var.get())
-        self.data["substitutions"] = self._parse_substitutions()
+        self.data["substitutions"] = self.subs
         self.data["formatting"] = {
             "vitals": bool(self.fmt_vitals.get()),
             "units": bool(self.fmt_units.get()),

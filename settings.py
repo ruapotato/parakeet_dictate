@@ -31,9 +31,11 @@ DEFAULTS = {
     # sounddevice device name (a stable string that survives index reshuffles).
     "audio_device": None,
     # How transcribed text reaches the cursor:
-    #   "paste" = clipboard + Ctrl+V (fast; briefly places text on the clipboard)
     #   "type"  = simulate keystrokes (nothing ever touches the clipboard)
-    "inject_method": "paste",
+    #   "paste" = clipboard + Ctrl+V (fast; briefly places text on the clipboard)
+    # Default is "type": the strongest PHI posture, since patient text never
+    # lands on the clipboard where another app could read it.
+    "inject_method": "type",
     "trailing_space": True,
     "capitalize_first": True,
     # When True, transcripts are printed to the console for troubleshooting.
