@@ -4,14 +4,30 @@ REM  Build ParakeetDictate.exe  (run this ON the Windows 13400T box)
 REM  Produces a single-file exe in .\dist\ParakeetDictate.exe
 REM ==========================================================================
 
-REM 1) Fresh virtual env keeps the bundle small and clean
-python -m venv .venv
+REM 0) Close any running instance first. A running ParakeetDictate.exe locks
+REM    dist\ParakeetDictate.exe, and then PyInstaller can't overwrite it
+REM    ("Access is denied" at the EXE step). Harmless if none is running.
+taskkill /F /IM ParakeetDictate.exe >nul 2>&1
+
+REM 1) Virtual env. Only create it if missing: re-running "python -m venv" over
+REM    an existing venv tries to overwrite python.exe and fails on a network
+REM    share / when the venv is in use. (Tip: build on a LOCAL disk, not a
+REM    mapped/network drive like T:\, to avoid file-lock and venv copy errors.)
+if not exist .venv\Scripts\python.exe python -m venv .venv
 call .venv\Scripts\activate.bat
 
 REM 1b) Clean stale build output so old artifacts never mix in
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 if exist ParakeetDictate.spec del /q ParakeetDictate.spec
+if exist dist\ParakeetDictate.exe (
+  echo.
+  echo [!] Could not delete dist\ParakeetDictate.exe - it is locked.
+  echo     Close the running app (Task Manager - ParakeetDictate.exe) or a
+  echo     virus scanner / network share is holding it, then re-run build.bat.
+  pause
+  goto :eof
+)
 
 REM 2) Dependencies + PyInstaller.
 REM    PyInstaller is PINNED so this local build and the GitHub CI build use the
