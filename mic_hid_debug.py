@@ -100,10 +100,25 @@ def watch(vid, pid):
                 pass
 
 
-def _report_size(report):
-    """pywinusb doesn't expose a report's byte length directly; find it by
-    probing which all-zero buffer set_raw_data accepts (harmless)."""
-    for size in range(1, 33):
+# Values tried per data byte: every single bit, then all bits. Covers both
+# bit-flag LEDs and simple on/off command bytes.
+LED_VALUES = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF]
+
+
+def _report_len(report):
+    """Byte length of a HID report (incl. the leading report-id byte). pywinusb
+    doesn't expose it cleanly, so try the raw buffer, the private field, then a
+    harmless all-zero set_raw_data probe."""
+    try:
+        d = report.get_raw_data()
+        if d:
+            return len(d)
+    except Exception:
+        pass
+    v = getattr(report, "_HidReport__raw_report_size", None)
+    if isinstance(v, int) and v > 0:
+        return v
+    for size in range(1, 65):
         try:
             report.set_raw_data([0] * size)
             return size
@@ -112,14 +127,26 @@ def _report_size(report):
     return None
 
 
-def find_led(vid, pid):
-    """Brute-force the LED control report. Enumerates every output and feature
-    report on the device and flashes each byte high one at a time; watch the
-    mic and note the step where the red LED lights. That report id + byte index
-    is all we need to drive the LED from Parakeet.
+def _zero(report, size, rid):
+    buf = [0] * size
+    if size > 1:
+        buf[0] = rid
+    try:
+        report.set_raw_data(buf)
+        report.send()
+    except Exception:
+        pass
 
-    Safe: it only sets one byte at a time and zeroes it back. If the device ever
-    acts oddly, just unplug/replug it.
+
+def find_led(vid, pid, hold=1.2):
+    """Deep probe for the LED control report. Walks every HID interface of the
+    (composite) device, every output and feature report, and drives each data
+    byte across every single bit plus 0xFF, then all bytes high together.
+
+    Each attempt prints a numbered line BEFORE it holds the value on, so when
+    the red LED lights, the last [#N] printed is the winner. Ctrl+C to stop
+    early. Safe: one report at a time, always zeroed back; unplug/replug if the
+    device acts odd.
     """
     flt = hid.HidDeviceFilter(vendor_id=vid) if pid is None \
         else hid.HidDeviceFilter(vendor_id=vid, product_id=pid)
@@ -129,13 +156,17 @@ def find_led(vid, pid):
               + (f" pid=0x{pid:04x}" if pid else ""))
         return
 
-    for dev in devices:
+    print(f"{len(devices)} HID interface(s) match. Probing each. WATCH THE LED; "
+          "note the [#N] that lights it.\n")
+    n = 0
+    for di, dev in enumerate(devices):
         try:
             dev.open()
         except Exception as e:
-            print(f"Could not open device: {e}")
+            print(f"[iface {di}] could not open: {e}")
             continue
         try:
+            path = (dev.device_path or "")[-40:]
             reports = []
             try:
                 reports += [("output", r) for r in dev.find_output_reports()]
@@ -145,42 +176,60 @@ def find_led(vid, pid):
                 reports += [("feature", r) for r in dev.find_feature_reports()]
             except Exception:
                 pass
-            if not reports:
-                print(f"0x{dev.vendor_id:04x}/0x{dev.product_id:04x} "
-                      f"{dev.product_name}: no writable reports on this interface")
-                continue
-            print(f"\n=== 0x{dev.vendor_id:04x}/0x{dev.product_id:04x} "
-                  f"{dev.product_name}: {len(reports)} writable report(s) ===")
+            print(f"=== iface {di}: 0x{dev.vendor_id:04x}/0x{dev.product_id:04x} "
+                  f"{dev.product_name} | {len(reports)} writable report(s) | ...{path}")
             for kind, report in reports:
-                size = _report_size(report)
-                if not size:
-                    continue
+                size = _report_len(report)
                 rid = report.report_id
-                print(f"\n--- {kind} report id={rid} ({size} bytes) --- "
-                      "WATCH THE LED")
-                for i in range(size):
+                if not size:
+                    print(f"  {kind} id={rid}: couldn't determine size; skipping")
+                    continue
+                # data bytes are everything after the leading report-id byte
+                data_idx = list(range(1, size)) if size > 1 else [0]
+                print(f"  {kind} report id={rid} ({size} bytes), sweeping "
+                      f"bytes {data_idx}")
+                for i in data_idx:
+                    for val in LED_VALUES:
+                        n += 1
+                        buf = [0] * size
+                        if size > 1:
+                            buf[0] = rid
+                        buf[i] = val
+                        try:
+                            report.set_raw_data(buf)
+                            report.send()
+                        except Exception as e:
+                            print(f"  [#{n}] id={rid} byte[{i}]=0x{val:02x} "
+                                  f"send failed: {e}")
+                            continue
+                        print(f"  [#{n}] {kind} id={rid} byte[{i}]=0x{val:02x} "
+                              f"<-- LED?")
+                        time.sleep(hold)
+                        _zero(report, size, rid)
+                        time.sleep(0.15)
+                # all data bytes high at once (multi-byte command LEDs)
+                if len(data_idx) > 1:
+                    n += 1
                     buf = [0] * size
-                    buf[i] = 0xFF
+                    buf[0] = rid
+                    for i in data_idx:
+                        buf[i] = 0xFF
                     try:
                         report.set_raw_data(buf)
                         report.send()
+                        print(f"  [#{n}] {kind} id={rid} ALL bytes=0xFF <-- LED?")
+                        time.sleep(hold)
                     except Exception as e:
-                        print(f"  byte[{i}] send failed: {e}")
-                        continue
-                    print(f"  {kind} id={rid} byte[{i}]=0xFF  <-- LED on now?")
-                    time.sleep(1.3)
-                    try:
-                        report.set_raw_data([0] * size)
-                        report.send()
-                    except Exception:
-                        pass
-                    time.sleep(0.3)
+                        print(f"  [#{n}] all-0xFF send failed: {e}")
+                    _zero(report, size, rid)
+                    time.sleep(0.15)
         finally:
             try:
                 dev.close()
             except Exception:
                 pass
-    print("\nDone. Tell me the line that lit the LED (kind, report id, byte).")
+    print(f"\nDone ({n} attempts). Tell me the [#N] that lit the LED — that "
+          "pins the interface, report id, byte, and value.")
 
 
 def main():
@@ -189,6 +238,8 @@ def main():
     ap.add_argument("--pid", help="product id, e.g. 0x1001")
     ap.add_argument("--leds", action="store_true",
                     help="probe output/feature reports to find the LED control byte")
+    ap.add_argument("--hold", type=float, default=1.2,
+                    help="seconds to hold each value on during --leds (default 1.2)")
     args = ap.parse_args()
 
     if not args.vid:
@@ -199,7 +250,7 @@ def main():
     if args.pid:
         pid = int(args.pid, 16) if args.pid.lower().startswith("0x") else int(args.pid)
     if args.leds:
-        find_led(vid, pid)
+        find_led(vid, pid, hold=args.hold)
     else:
         watch(vid, pid)
 
