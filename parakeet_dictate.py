@@ -210,11 +210,13 @@ def _continuous_worker():
                 if emitted == 0 and raw_hold:
                     tail = np.concatenate(raw_hold)
                     if len(tail) / SAMPLE_RATE >= MIN_SECONDS:
-                        peak = getattr(_segmenter, "peak_prob", None)
+                        peak = getattr(_segmenter, "peak_prob", 0.0)
                         thr = getattr(_segmenter, "threshold", None)
+                        rms = float(np.sqrt(np.mean(np.square(tail))))
                         print("[continuous] VAD produced no segments this hold "
-                              f"(peak speech prob {peak:.2f} vs threshold {thr}); "
-                              "transcribing full audio as fallback", file=sys.stderr)
+                              f"(peak speech prob {peak:.3f} vs threshold {thr}, "
+                              f"audio rms {rms:.4f}); transcribing full audio as "
+                              "fallback", file=sys.stderr)
                         _recognize_and_inject(tail)
             except Exception as e:
                 print(f"[continuous] flush failed: {e}", file=sys.stderr)

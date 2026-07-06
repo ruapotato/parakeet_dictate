@@ -74,7 +74,17 @@ def resolve_model(download=True):
 
 
 class SileroVAD:
-    """Thin onnxruntime wrapper: feed 512-sample frames, get a speech probability."""
+    """Thin onnxruntime wrapper: feed 512-sample frames, get a speech probability.
+
+    Silero is trained on speech roughly near full scale, so a low-gain mic (e.g.
+    a dictation handset) can deliver audio that the recognizer still transcribes
+    fine but that Silero scores at ~0. A light automatic gain control boosts
+    quiet input toward a target peak before inference, while a slowly-decaying
+    peak estimate keeps genuine pauses quiet (so silence still scores ~0)."""
+
+    _AGC_TARGET_PEAK = 0.7    # scale speech up toward this absolute peak
+    _AGC_MAX_GAIN = 40.0      # never amplify by more than this
+    _AGC_DECAY = 0.995        # how slowly the tracked peak falls during pauses
 
     def __init__(self, model_path=None):
         import onnxruntime as ort
@@ -89,9 +99,21 @@ class SileroVAD:
 
     def reset(self):
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._agc_peak = 0.0
+
+    def _normalize(self, f):
+        peak = float(np.max(np.abs(f))) if f.size else 0.0
+        # Track the recent peak: rises instantly on louder audio, decays slowly
+        # so a brief pause doesn't get amplified into apparent speech.
+        self._agc_peak = max(peak, self._agc_peak * self._AGC_DECAY)
+        if self._agc_peak > 1e-4:
+            gain = min(self._AGC_TARGET_PEAK / self._agc_peak, self._AGC_MAX_GAIN)
+            return f * gain
+        return f
 
     def prob(self, frame):
-        x = np.asarray(frame, dtype=np.float32).reshape(1, -1)
+        f = np.asarray(frame, dtype=np.float32)
+        x = self._normalize(f).reshape(1, -1)
         out, self._state = self._sess.run(
             ["output", "stateN"],
             {"input": x, "state": self._state, "sr": self._sr})
