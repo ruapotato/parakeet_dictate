@@ -520,7 +520,7 @@ def load_model_bg():
     global model, _download_progress
     import onnx_asr
     _install_hf_download_progress()
-    _set_status("Loading model (first run downloads ~640 MB)...")
+    _set_status("Loading model...")
     model = onnx_asr.load_model(MODEL_NAME, quantization="int8",
                                 providers=["CPUExecutionProvider"])
     # Download finished (or was cached); drop back to the indeterminate spinner
