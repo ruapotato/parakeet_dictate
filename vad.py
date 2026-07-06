@@ -10,6 +10,7 @@ The ~2 MB model is downloaded once to a local cache (like the main model) or
 loaded from a bundled models/ folder if the exe ships with it.
 """
 
+import os
 import sys
 import urllib.request
 from collections import deque
@@ -35,8 +36,15 @@ def _candidate_paths():
 
 
 def _cache_path():
-    d = Path.home() / ".cache" / "parakeet_dictate"
-    d.mkdir(parents=True, exist_ok=True)
+    # Shared machine-wide dir when the app set one (all users reuse one copy),
+    # else the per-user cache.
+    base = os.environ.get("PARAKEET_MODEL_DIR")
+    d = Path(base) if base else Path.home() / ".cache" / "parakeet_dictate"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        d = Path.home() / ".cache" / "parakeet_dictate"
+        d.mkdir(parents=True, exist_ok=True)
     return d / VAD_FILENAME
 
 
@@ -118,9 +126,12 @@ class Segmenter:
         self._buf = []
         self._silence = 0
         self._prepad.clear()
+        self.peak_prob = 0.0   # highest speech probability seen this hold
 
     def push(self, frame):
         p = self.vad.prob(frame)
+        if p > self.peak_prob:
+            self.peak_prob = p
         if not self._triggered:
             self._prepad.append(frame)
             if p >= self.threshold:

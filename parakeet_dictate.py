@@ -8,11 +8,13 @@ is post-processed (filler stripping, macro expansion) -> pasted at the cursor.
 No cloud, no GPU. Settings live in the user's Documents folder so they roam.
 """
 
+import os
 import sys
 import time
 import queue
 import threading
 from collections import deque
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
@@ -208,7 +210,10 @@ def _continuous_worker():
                 if emitted == 0 and raw_hold:
                     tail = np.concatenate(raw_hold)
                     if len(tail) / SAMPLE_RATE >= MIN_SECONDS:
-                        print("[continuous] VAD produced no segments this hold; "
+                        peak = getattr(_segmenter, "peak_prob", None)
+                        thr = getattr(_segmenter, "threshold", None)
+                        print("[continuous] VAD produced no segments this hold "
+                              f"(peak speech prob {peak:.2f} vs threshold {thr}); "
                               "transcribing full audio as fallback", file=sys.stderr)
                         _recognize_and_inject(tail)
             except Exception as e:
@@ -408,6 +413,64 @@ def _install_hf_download_progress():
     _hf_tqdm_mod.tqdm = _ReportingTqdm
 
 
+def _shared_models_dir():
+    """Machine-wide model cache shared by all users on this PC. On Windows this
+    is %ProgramData%\\ParakeetDictate\\models (readable by every account); other
+    platforms keep the per-user cache. An explicit PARAKEET_MODEL_DIR wins."""
+    override = os.environ.get("PARAKEET_MODEL_DIR")
+    if override:
+        return Path(override)
+    if sys.platform.startswith("win"):
+        pd = os.environ.get("ProgramData") or r"C:\ProgramData"
+        return Path(pd) / "ParakeetDictate" / "models"
+    return None
+
+
+def _writable(path):
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write_test"
+        probe.write_text("ok")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _hf_model_cached(hf_home):
+    snaps = (hf_home / "hub" /
+             f"models--istupakov--{MODEL_NAME.replace('nemo-', '')}-onnx" /
+             "snapshots")
+    return snaps.is_dir() and any(snaps.iterdir())
+
+
+def _configure_shared_cache():
+    """Point the speech model (HF) and VAD caches at the shared machine-wide
+    folder so every user on a PC shares one ~670 MB download. Must run before
+    huggingface_hub is imported (HF_HOME is read at its import). Degrades to the
+    per-user cache if the shared folder can't be used."""
+    base = _shared_models_dir()
+    if base is None:
+        return
+    hf_home = base / "huggingface"
+    writable = _writable(hf_home)
+    cached = _hf_model_cached(hf_home)
+    if not writable and not cached:
+        # Can't write and nothing is there yet (e.g. a locked-down account before
+        # anyone has seeded it) -> leave the per-user cache in place.
+        print(f"[cache] shared cache {base} not writable and empty; "
+              "using per-user cache", file=sys.stderr)
+        return
+    os.environ["HF_HOME"] = str(hf_home)
+    os.environ["PARAKEET_MODEL_DIR"] = str(base)  # picked up by vad.py
+    if cached and not writable:
+        # A later user with read-only access to the first user's download: load
+        # straight from the cache without any network/lock writes.
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    print(f"[cache] shared model cache: {base}  "
+          f"(writable={writable}, cached={cached})", file=sys.stderr)
+
+
 def load_model_bg():
     global model, _download_progress
     import onnx_asr
@@ -509,6 +572,9 @@ def _shutdown_stream():
 
 def main():
     global status_var
+    # Redirect model caches to the shared machine-wide folder before anything
+    # imports huggingface_hub or the VAD starts loading in the background.
+    _configure_shared_cache()
     root = tk.Tk()
     root.title("Parakeet Dictate")
     root.geometry("360x170")
