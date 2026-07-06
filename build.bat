@@ -20,14 +20,7 @@ REM 1b) Clean stale build output so old artifacts never mix in
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 if exist ParakeetDictate.spec del /q ParakeetDictate.spec
-if exist dist\ParakeetDictate.exe (
-  echo.
-  echo [!] Could not delete dist\ParakeetDictate.exe - it is locked.
-  echo     Close the running app (Task Manager - ParakeetDictate.exe) or a
-  echo     virus scanner / network share is holding it, then re-run build.bat.
-  pause
-  goto :eof
-)
+if exist dist\ParakeetDictate.exe goto :locked
 
 REM 2) Dependencies + PyInstaller.
 REM    PyInstaller is PINNED so this local build and the GitHub CI build use the
@@ -62,3 +55,12 @@ echo  First launch downloads the model (~640 MB) once, then it
 echo  runs fully offline.
 echo ============================================================
 pause
+goto :eof
+
+:locked
+echo.
+echo [!] Could not delete dist\ParakeetDictate.exe - it is locked.
+echo     Close the running app in Task Manager, then re-run build.bat.
+echo     A virus scanner or network share can also hold it; a local disk helps.
+pause
+goto :eof
