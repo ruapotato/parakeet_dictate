@@ -174,7 +174,7 @@ def stop_and_transcribe():
 # ---------------------------------------------------------------------------
 # Continuous dictation worker
 # ---------------------------------------------------------------------------
-def _handle_segment(res):
+def _handle_segment(res, source="hold"):
     """Transcribe+inject one closed segment. Returns True if audio was emitted."""
     global _next_mid_sentence
     if res is None:
@@ -182,6 +182,12 @@ def _handle_segment(res):
     seg, forced = res
     if seg is None:
         return False
+    # Visibility into segmentation: a "pause" line during a hold means a sentence
+    # was cut and inserted live; only a "flush" line at release means the whole
+    # utterance came out at once (pause threshold too high for your speech).
+    reason = "flush" if source == "flush" else ("max-cut" if forced else "pause")
+    print(f"[continuous] segment {len(seg) / SAMPLE_RATE:.1f}s ({reason})",
+          file=sys.stderr)
     _recognize_and_inject(seg, mid_sentence=_next_mid_sentence)
     _next_mid_sentence = bool(forced)
     return True
@@ -201,7 +207,7 @@ def _continuous_worker():
             return
         if item is _FLUSH:
             try:
-                if _segmenter is not None and _handle_segment(_segmenter.flush()):
+                if _segmenter is not None and _handle_segment(_segmenter.flush(), "flush"):
                     emitted += 1
                 # Safety net: if the VAD never carved out a single segment for
                 # the whole hold (mis-loaded model, corrupt download, very quiet
