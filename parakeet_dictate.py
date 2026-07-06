@@ -68,9 +68,11 @@ _vadmod = None                 # lazily-imported vad module
 _vad = None                    # SileroVAD instance
 _segmenter = None              # vad.Segmenter instance
 _continuous = False            # is the current hold using continuous mode?
-_next_mid_sentence = False     # suppress capitalization after a forced mid-cut
-_seg_queue = None              # audio chunks -> continuous worker thread
+_seg_queue = None              # audio chunks -> segmentation worker thread
 _seg_thread = None
+_recog_queue = None            # closed segments -> recognition worker thread
+_recog_thread = None
+_START = object()              # sentinel: begin a hold, reset the segmenter
 _FLUSH = object()              # sentinel: end of hold, flush the tail segment
 
 
@@ -118,7 +120,7 @@ def _recognize_and_inject(audio, mid_sentence=False):
 
 
 def start_recording():
-    global _recording, _capture, _continuous, _next_mid_sentence, _ring_samples
+    global _recording, _capture, _continuous, _ring_samples
     if not model_ready.is_set():
         return
     use_continuous = bool(SETTINGS.get("continuous", {}).get("enabled")) and \
@@ -128,10 +130,11 @@ def start_recording():
             return
         _continuous = use_continuous
         if use_continuous:
-            _segmenter.reset()
-            _next_mid_sentence = False
-            # Seed the segmenter with pre-speech audio *before* flipping the
-            # recording flag, so live chunks can't be queued ahead of preroll.
+            # Hand the segmenter off to the worker thread only: queue a _START
+            # (worker resets there — never touch _segmenter from this thread) and
+            # the pre-speech audio *before* flipping the recording flag, so live
+            # chunks can't be queued ahead of the preroll.
+            _seg_queue.put(_START)
             for ch in _ring:
                 _seg_queue.put(ch)
             _ring.clear()
@@ -174,45 +177,77 @@ def stop_and_transcribe():
 # ---------------------------------------------------------------------------
 # Continuous dictation worker
 # ---------------------------------------------------------------------------
-def _handle_segment(res, source="hold"):
-    """Transcribe+inject one closed segment. Returns True if audio was emitted."""
-    global _next_mid_sentence
+def _enqueue_segment(res, mid_sentence, source="hold"):
+    """Hand one closed segment to the recognition thread. Returns the segment's
+    `forced` flag if a real segment was queued, else None. Recognition is
+    deliberately NOT done here so the slow (~seconds) model can't stall the VAD /
+    audio intake. mid_sentence rides through the queue so capitalization is
+    decided in this single ordered thread, not shared across threads."""
     if res is None:
-        return False
+        return None
     seg, forced = res
     if seg is None:
-        return False
+        return None
     # Visibility into segmentation: a "pause" line during a hold means a sentence
-    # was cut and inserted live; only a "flush" line at release means the whole
+    # boundary was found live; only a "flush" line at release means the whole
     # utterance came out at once (pause threshold too high for your speech).
     reason = "flush" if source == "flush" else ("max-cut" if forced else "pause")
     print(f"[continuous] segment {len(seg) / SAMPLE_RATE:.1f}s ({reason})",
           file=sys.stderr)
-    _recognize_and_inject(seg, mid_sentence=_next_mid_sentence)
-    _next_mid_sentence = bool(forced)
-    return True
+    _recog_queue.put((seg, mid_sentence))
+    return forced
+
+
+def _recognition_worker():
+    """Recognize + inject queued segments in order, off the segmentation thread.
+    Single thread = correct insertion order and serialized model access."""
+    while True:
+        item = _recog_queue.get()
+        if item is None:
+            return
+        if item is _FLUSH:            # end-of-hold marker: recog backlog drained
+            _set_status("Ready")
+            continue
+        seg, mid_sentence = item
+        try:
+            _recognize_and_inject(seg, mid_sentence=mid_sentence)
+        except Exception as e:
+            print(f"[continuous] recognize failed: {e}", file=sys.stderr)
 
 
 def _continuous_worker():
-    """Re-slice queued audio into 512-sample frames, run the segmenter, and
-    transcribe+inject each completed segment in order (single thread = correct
-    insertion order and serialized model access)."""
+    """Re-slice queued audio into 512-sample frames and run the VAD segmenter.
+    Closed segments are pushed to the recognition thread rather than transcribed
+    here, so this thread always keeps up with real-time audio. The segmenter is
+    owned exclusively by this thread (reset on _START), so nothing races it."""
     accum = None
     raw_hold = []       # every sample of the current hold (fallback source)
     raw_len = 0
     emitted = 0         # segments emitted during the current hold
+    next_mid = False    # was the previous emitted segment a forced mid-cut?
     while True:
         item = _seg_queue.get()
         if item is None:
             return
+        if item is _START:
+            if _segmenter is not None:
+                _segmenter.reset()
+            accum = None
+            raw_hold = []
+            raw_len = 0
+            emitted = 0
+            next_mid = False
+            continue
         if item is _FLUSH:
             try:
-                if _segmenter is not None and _handle_segment(_segmenter.flush(), "flush"):
-                    emitted += 1
+                if _segmenter is not None:
+                    forced = _enqueue_segment(_segmenter.flush(), next_mid, "flush")
+                    if forced is not None:
+                        emitted += 1
+                        next_mid = forced
                 # Safety net: if the VAD never carved out a single segment for
-                # the whole hold (mis-loaded model, corrupt download, very quiet
-                # mic...), don't silently drop the user's speech — transcribe the
-                # raw held audio so continuous mode never loses a dictation.
+                # the whole hold (very quiet mic, etc.), don't silently drop the
+                # user's speech — transcribe the raw held audio instead.
                 if emitted == 0 and raw_hold:
                     tail = np.concatenate(raw_hold)
                     if len(tail) / SAMPLE_RATE >= MIN_SECONDS:
@@ -223,14 +258,14 @@ def _continuous_worker():
                               f"(peak speech prob {peak:.3f} vs threshold {thr}, "
                               f"audio rms {rms:.4f}); transcribing full audio as "
                               "fallback", file=sys.stderr)
-                        _recognize_and_inject(tail)
+                        _recog_queue.put((tail, False))
             except Exception as e:
                 print(f"[continuous] flush failed: {e}", file=sys.stderr)
             accum = None
             raw_hold = []
             raw_len = 0
             emitted = 0
-            _set_status("Ready")
+            _recog_queue.put(_FLUSH)   # status -> Ready once recog backlog drains
             continue
         if _segmenter is None:
             continue
@@ -247,8 +282,10 @@ def _continuous_worker():
             while len(accum) >= n:
                 frame = accum[:n]
                 accum = accum[n:]
-                if _handle_segment(_segmenter.push(frame)):
+                forced = _enqueue_segment(_segmenter.push(frame), next_mid)
+                if forced is not None:
                     emitted += 1
+                    next_mid = forced
         except Exception as e:
             print(f"[continuous] segmentation error: {e}", file=sys.stderr)
 
@@ -547,7 +584,8 @@ def _start_stream():
 def _startup():
     """All blocking init runs here (off the UI thread) so the loading window
     appears instantly instead of waiting on the audio device to open."""
-    global np, sd, keyboard, pyperclip, _seg_queue, _seg_thread
+    global np, sd, keyboard, pyperclip
+    global _seg_queue, _seg_thread, _recog_queue, _recog_thread
     try:
         _set_status("Loading components...")
         import numpy as _np; np = _np
@@ -557,8 +595,13 @@ def _startup():
         _set_status("Starting audio...")
         _start_stream()
         install_input()
-        # continuous-dictation plumbing (idle until a hold uses continuous mode)
+        # continuous-dictation plumbing (idle until a hold uses continuous mode):
+        # a segmentation thread (VAD, must keep up with audio) feeds a separate
+        # recognition thread (slow model) so recognition never stalls the VAD.
         _seg_queue = queue.Queue()
+        _recog_queue = queue.Queue()
+        _recog_thread = threading.Thread(target=_recognition_worker, daemon=True)
+        _recog_thread.start()
         _seg_thread = threading.Thread(target=_continuous_worker, daemon=True)
         _seg_thread.start()
         if SETTINGS.get("continuous", {}).get("enabled"):
