@@ -1,0 +1,35 @@
+# PyInstaller version resource for ParakeetDictate.exe.
+# Embeds a Windows VERSIONINFO block so the built exe carries a
+# CompanyName / ProductName / FileVersion instead of being an anonymous
+# binary — anonymous PyInstaller exes read as more suspicious to Windows
+# Defender / SmartScreen. Bump the (major, minor, patch, build) tuples in
+# filevers/prodvers when you cut a release.
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'David Hamner'),
+          StringStruct('FileDescription', 'Parakeet Dictate - local, CPU-only dictation'),
+          StringStruct('FileVersion', '1.0.0.0'),
+          StringStruct('InternalName', 'ParakeetDictate'),
+          StringStruct('LegalCopyright', 'Licensed under the GNU GPL v3.'),
+          StringStruct('OriginalFilename', 'ParakeetDictate.exe'),
+          StringStruct('ProductName', 'Parakeet Dictate'),
+          StringStruct('ProductVersion', '1.0.0.0'),
+        ]),
+    ]),
+    VarFileInfo([VarStruct('Translation', [0x0409, 0x04B0])]),
+  ],
+)

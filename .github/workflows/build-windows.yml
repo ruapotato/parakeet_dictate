@@ -38,7 +38,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          # PyInstaller is PINNED to the same version as build.bat so the CI
+          # build and a local build share one bootloader. Unpinned, CI could
+          # pull a newer bootloader whose signature Windows Defender flags as a
+          # packer. Keep this in sync with build.bat if you bump it.
+          pip install -r requirements.txt pyinstaller==6.21.0
 
       - name: Sanity-check pure-Python logic
         run: |
@@ -49,6 +53,7 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name ParakeetDictate \
             --icon parakeet.ico \
+            --version-file version.txt \
             --collect-all onnxruntime \
             --collect-all pywinusb \
             --collect-all onnx_asr \

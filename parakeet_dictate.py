@@ -44,6 +44,13 @@ model = None
 model_ready = threading.Event()
 
 _lock = threading.Lock()
+# Model-download progress, published by the huggingface_hub tqdm hook and read
+# by the loading window's poll loop. None = no active large download (either not
+# started yet, or already cached); otherwise (done_bytes, total_bytes).
+_download_progress = None
+# Ignore huggingface_hub's tiny config/vocab downloads so only the ~640 MB model
+# file drives the progress bar.
+_MODEL_FILE_MIN_BYTES = 10 * 1024 * 1024
 _recording = False
 _capture = []
 _ring = deque()
@@ -322,12 +329,60 @@ def install_input():
 # ---------------------------------------------------------------------------
 # Model load (background)
 # ---------------------------------------------------------------------------
+def _install_hf_download_progress():
+    """Route huggingface_hub's per-file byte progress into `_download_progress`
+    so the loading window can show a real progress bar during the one-time
+    ~640 MB model download instead of an indeterminate spinner (which is
+    indistinguishable from a hang). Best-effort: a no-op if hf internals change.
+
+    hf builds its byte-progress bar via huggingface_hub.utils.tqdm.tqdm; we
+    subclass it and republish n/total on each update. Patching that one module
+    global covers both hf_hub_download and snapshot_download."""
+    try:
+        import importlib
+        # The *submodule* (utils/tqdm.py), not the re-exported class of the same
+        # name on the utils package. Its module-global `tqdm` is the class hf's
+        # progress-bar context manager instantiates.
+        _hf_tqdm_mod = importlib.import_module("huggingface_hub.utils.tqdm")
+    except Exception:
+        return
+    base = _hf_tqdm_mod.tqdm
+
+    def _publish(done, total):
+        global _download_progress
+        if total and total >= _MODEL_FILE_MIN_BYTES:
+            _download_progress = (min(done, total), total)
+
+    class _ReportingTqdm(base):
+        def update(self, n=1):
+            r = super().update(n)
+            try:
+                _publish(self.n, self.total or 0)
+            except Exception:
+                pass
+            return r
+
+        def close(self):
+            try:
+                if self.total:
+                    _publish(self.total, self.total)
+            except Exception:
+                pass
+            return super().close()
+
+    _hf_tqdm_mod.tqdm = _ReportingTqdm
+
+
 def load_model_bg():
-    global model
+    global model, _download_progress
     import onnx_asr
+    _install_hf_download_progress()
     _set_status("Loading model (first run downloads ~640 MB)...")
     model = onnx_asr.load_model(MODEL_NAME, quantization="int8",
                                 providers=["CPUExecutionProvider"])
+    # Download finished (or was cached); drop back to the indeterminate spinner
+    # for the model-init + warmup tail below.
+    _download_progress = None
     model.recognize(np.zeros(SAMPLE_RATE, dtype=np.float32), sample_rate=SAMPLE_RATE)
     model_ready.set()
     _set_status("Ready")
@@ -438,7 +493,23 @@ def main():
     status_var = tk.StringVar(value="Starting...")
 
     def poll_loading():
-        load_msg.config(text=status_var.get())
+        prog = _download_progress
+        if prog is not None and prog[0] < prog[1]:
+            # Actively downloading the model -> real, determinate progress bar.
+            done, total = prog
+            if str(bar["mode"]) != "determinate":
+                bar.stop()
+                bar.config(mode="determinate", maximum=total)
+            bar["value"] = done
+            mb = 1024 * 1024
+            load_msg.config(text=f"Downloading model: {done // mb} / {total // mb} MB"
+                                 f"  ({done * 100 // total}%)")
+        else:
+            # Not downloading (pre-download, cached, or download done -> init).
+            if str(bar["mode"]) != "indeterminate":
+                bar.config(mode="indeterminate")
+                bar.start(12)
+            load_msg.config(text=status_var.get())
         if model_ready.is_set():
             bar.stop()
             loading.destroy()
