@@ -68,6 +68,7 @@ _input_hook = None
 _mic_reader = None
 _stream = None
 status_var = None
+_active_input = ""             # human description of the input source in use
 
 # --- continuous dictation (VAD segmentation) ---
 _vadmod = None                 # lazily-imported vad module
@@ -430,7 +431,7 @@ def _trigger_release():
 
 
 def install_input():
-    global _input_hook, _mic_reader, _key_is_down
+    global _input_hook, _mic_reader, _key_is_down, _active_input
     # tear down any existing sources
     if _input_hook is not None:
         try:
@@ -448,8 +449,10 @@ def install_input():
 
     inp = SETTINGS["input"]
     mode = inp.get("mode", "hotkey")
+    behavior = inp.get("hold_or_toggle", "hold")
+    mic_wanted = mode == "mic_button" and inp.get("mic")
 
-    if mode == "mic_button" and inp.get("mic"):
+    if mic_wanted:
         mic = inp["mic"]
         # Extra momentary buttons on the same mic -> keystrokes (fire on press).
         actions = []
@@ -462,6 +465,8 @@ def install_input():
             on_press=_trigger_press, on_release=_trigger_release,
             actions=actions)
         if _mic_reader.start():
+            _active_input = (f'{behavior}  -  {mic.get("product", "mic")} '
+                             f'({mic_hid.describe(mic)})')
             return
         # fall back to keyboard if the device could not be opened
         print("[input] mic unavailable; falling back to keyboard hotkey")
@@ -482,6 +487,10 @@ def install_input():
             _trigger_release()
 
     _input_hook = keyboard.hook(handler)
+    # Reflect what is ACTUALLY active, incl. a fallback when the mic is unplugged.
+    _active_input = f'{behavior}  -  key: {key}'
+    if mic_wanted:
+        _active_input += "  (mic not found)"
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +811,9 @@ def main():
 
 def build_main_view(root):
     """Shown only after the model has finished loading."""
+    # Shrink back down from the tall loading window (which held the log panel)
+    # so the ready view isn't mostly blank space.
+    root.geometry("360x170")
     frame = ttk.Frame(root)
     frame.pack(fill="both", expand=True)
 
@@ -817,13 +829,9 @@ def build_main_view(root):
     ttk.Button(frame, text="Edit Settings", command=open_settings).pack(pady=8)
 
     def refresh_hint():
-        inp = SETTINGS["input"]
-        if inp.get("mode") == "mic_button" and inp.get("mic"):
-            mic = inp["mic"]
-            src = f'{mic.get("product", "mic")} ({mic_hid.describe(mic)})'
-        else:
-            src = f'key: {inp["hotkey"]}'
-        hint.config(text=f'{inp["hold_or_toggle"]}  -  {src}')
+        # Show what's ACTUALLY active (set by install_input), which reflects a
+        # keyboard fallback when the configured mic isn't plugged in.
+        hint.config(text=_active_input or "starting...")
         root.after(1000, refresh_hint)
     refresh_hint()
     _set_status("Ready")
