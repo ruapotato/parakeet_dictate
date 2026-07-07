@@ -44,6 +44,12 @@ PREROLL_SAMPLES = int(SAMPLE_RATE * PREROLL_SECONDS)
 SETTINGS = settings_mod.load()
 model = None
 model_ready = threading.Event()
+model_error = threading.Event()   # set if model load fails (unblocks the window)
+
+# Recent log lines for the loading window's debug panel, plus the log file path.
+# The windowed exe has no console, so all prints are teed here and to a file.
+_LOG = deque(maxlen=1000)
+_log_path = None
 
 _lock = threading.Lock()
 # Model-download progress, published by the huggingface_hub tqdm hook and read
@@ -74,6 +80,66 @@ _recog_queue = None            # closed segments -> recognition worker thread
 _recog_thread = None
 _START = object()              # sentinel: begin a hold, reset the segmenter
 _FLUSH = object()              # sentinel: end of hold, flush the tail segment
+
+
+# ---------------------------------------------------------------------------
+# Logging (windowed exe has no console: tee stdout/stderr to a file + a buffer
+# the loading window shows, so we can see exactly where startup hangs/fails)
+# ---------------------------------------------------------------------------
+class _Tee:
+    def __init__(self, stream, fh):
+        self._stream = stream    # original stream (None under --windowed)
+        self._fh = fh            # log file handle (None if it couldn't open)
+        self._buf = ""
+
+    def write(self, s):
+        for t in (self._stream, self._fh):
+            if t is not None:
+                try:
+                    t.write(s)
+                except Exception:
+                    pass
+        # accumulate complete lines for the GUI panel
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            _LOG.append(line)
+        return len(s)
+
+    def flush(self):
+        for t in (self._stream, self._fh):
+            if t is not None:
+                try:
+                    t.flush()
+                except Exception:
+                    pass
+
+
+def _setup_logging():
+    """Tee stdout/stderr to a log file and an in-memory buffer. Must run before
+    anything else prints. Returns the log file path (or None)."""
+    global _log_path
+    base = (os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP")
+            or os.path.expanduser("~"))
+    fh = None
+    try:
+        d = Path(base) / "ParakeetDictate" / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        _log_path = d / "parakeet_dictate.log"
+        fh = open(_log_path, "a", encoding="utf-8", buffering=1)
+    except Exception:
+        _log_path = None
+    sys.stdout = _Tee(sys.__stdout__, fh)
+    sys.stderr = _Tee(sys.__stderr__, fh)
+    _log(f"===== Parakeet Dictate starting (log: {_log_path}) =====")
+
+
+def _log(msg):
+    """Timestamped line to the tee'd stderr (file + GUI buffer + console)."""
+    try:
+        print(f"{time.strftime('%H:%M:%S')} {msg}", file=sys.stderr)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -525,17 +591,30 @@ def _configure_shared_cache():
 
 def load_model_bg():
     global model, _download_progress
-    import onnx_asr
-    _install_hf_download_progress()
-    _set_status("Loading model...")
-    model = onnx_asr.load_model(MODEL_NAME, quantization="int8",
-                                providers=["CPUExecutionProvider"])
-    # Download finished (or was cached); drop back to the indeterminate spinner
-    # for the model-init + warmup tail below.
-    _download_progress = None
-    model.recognize(np.zeros(SAMPLE_RATE, dtype=np.float32), sample_rate=SAMPLE_RATE)
-    model_ready.set()
-    _set_status("Ready")
+    try:
+        _log("model: importing onnx_asr...")
+        import onnx_asr
+        _install_hf_download_progress()
+        _set_status("Loading model...")
+        _log(f"model: load_model({MODEL_NAME}, int8) start")
+        model = onnx_asr.load_model(MODEL_NAME, quantization="int8",
+                                    providers=["CPUExecutionProvider"])
+        # Download finished (or was cached); drop back to the indeterminate
+        # spinner for the model-init + warmup tail below.
+        _download_progress = None
+        _log("model: loaded; warming up (1s of silence)")
+        _set_status("Warming up model...")
+        model.recognize(np.zeros(SAMPLE_RATE, dtype=np.float32),
+                        sample_rate=SAMPLE_RATE)
+        model_ready.set()
+        _set_status("Ready")
+        _log("model: ready")
+    except Exception as e:
+        import traceback
+        _log(f"model: LOAD FAILED: {e}")
+        traceback.print_exc()
+        _set_status(f"Model failed to load: {e}")
+        model_error.set()   # unblock the loading window so it shows the error
 
 
 # ---------------------------------------------------------------------------
@@ -595,12 +674,14 @@ def _startup():
     global _seg_queue, _seg_thread, _recog_queue, _recog_thread
     try:
         _set_status("Loading components...")
-        import numpy as _np; np = _np
-        import sounddevice as _sd; sd = _sd
-        import keyboard as _kb; keyboard = _kb
-        import pyperclip as _pc; pyperclip = _pc
+        _log("startup: importing numpy"); import numpy as _np; np = _np
+        _log("startup: importing sounddevice"); import sounddevice as _sd; sd = _sd
+        _log("startup: importing keyboard"); import keyboard as _kb; keyboard = _kb
+        _log("startup: importing pyperclip"); import pyperclip as _pc; pyperclip = _pc
         _set_status("Starting audio...")
+        _log("startup: opening audio stream")
         _start_stream()
+        _log("startup: installing input hook")
         install_input()
         # continuous-dictation plumbing (idle until a hold uses continuous mode):
         # a segmentation thread (VAD, must keep up with audio) feeds a separate
@@ -613,8 +694,11 @@ def _startup():
         _seg_thread.start()
         if SETTINGS.get("continuous", {}).get("enabled"):
             threading.Thread(target=_load_vad_bg, daemon=True).start()
+        _log("startup: components ready")
     except Exception as e:
-        print(f"[startup] init failed: {e}")
+        import traceback
+        _log(f"startup: init failed (non-fatal, continuing to model): {e}")
+        traceback.print_exc()
     load_model_bg()
 
 
@@ -630,28 +714,53 @@ def _shutdown_stream():
 
 def main():
     global status_var
+    _setup_logging()   # capture everything before anything else prints
     # Redirect model caches to the shared machine-wide folder before anything
     # imports huggingface_hub or the VAD starts loading in the background.
     _configure_shared_cache()
     root = tk.Tk()
     root.title("Parakeet Dictate")
-    root.geometry("360x170")
+    root.geometry("560x420")
 
     # --- loading view -----------------------------------------------------
     loading = ttk.Frame(root)
     loading.pack(fill="both", expand=True)
     ttk.Label(loading, text="Loading Parakeet Dictate",
-              font=("Segoe UI", 12)).pack(pady=(28, 6))
-    load_msg = ttk.Label(loading, foreground="#555",
-                         text="Please stand by...")
+              font=("Segoe UI", 12)).pack(pady=(18, 6))
+    load_msg = ttk.Label(loading, foreground="#555", text="Please stand by...")
     load_msg.pack()
     bar = ttk.Progressbar(loading, mode="indeterminate", length=240)
-    bar.pack(pady=16)
+    bar.pack(pady=12)
     bar.start(12)
 
+    # Debug panel: live tail of the log so a hang/failure is visible without a
+    # console (the windowed exe has none). Also written to the log file.
+    logframe = ttk.Frame(loading)
+    logframe.pack(fill="both", expand=True, padx=10, pady=(4, 8))
+    logbox = tk.Text(logframe, height=10, wrap="none", font=("Consolas", 8),
+                     background="#111", foreground="#ddd", borderwidth=0)
+    sb = ttk.Scrollbar(logframe, command=logbox.yview)
+    logbox.configure(yscrollcommand=sb.set, state="disabled")
+    sb.pack(side="right", fill="y")
+    logbox.pack(side="left", fill="both", expand=True)
+    ttk.Label(loading, foreground="#888", font=("Segoe UI", 8),
+              text=f"Log: {_log_path}").pack(pady=(0, 6))
+
     status_var = tk.StringVar(value="Starting...")
+    _last_log_len = [0]
+
+    def refresh_log():
+        if len(_LOG) == _last_log_len[0]:
+            return
+        _last_log_len[0] = len(_LOG)
+        logbox.config(state="normal")
+        logbox.delete("1.0", "end")
+        logbox.insert("1.0", "\n".join(_LOG))
+        logbox.see("end")
+        logbox.config(state="disabled")
 
     def poll_loading():
+        refresh_log()
         prog = _download_progress
         if prog is not None and prog[0] < prog[1]:
             # Actively downloading the model -> real, determinate progress bar.
@@ -673,6 +782,11 @@ def main():
             bar.stop()
             loading.destroy()
             build_main_view(root)
+        elif model_error.is_set():
+            # Don't hang: stop the spinner and leave the error + log on screen.
+            bar.stop()
+            load_msg.config(text=status_var.get(), foreground="#c0392b")
+            root.after(500, poll_loading)   # keep tailing the log
         else:
             root.after(200, poll_loading)
 
